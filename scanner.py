@@ -3,6 +3,7 @@ import requests
 from bs4 import BeautifulSoup
 import pprint
 import urllib3
+from concurrent.futures import ThreadPoolExecutor, as_completed  # <<-- TAMBAHAN
 
 # Disable insecure warnings (karena verify=False dipakai)
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -18,7 +19,7 @@ def check_security_headers(url, session):
     found_headers = {}
     missing_headers = {}
     try:
-        response = session.get(url, timeout=10, verify=False)
+        response = session.get(url, timeout=8, verify=False)  # <<-- timeout dikurangi ke 8
         response_headers = {k: v for k, v in response.headers.items()}
 
         for header, description in headers_to_check.items():
@@ -35,7 +36,7 @@ def check_security_headers(url, session):
 def find_tech_info(url, session):
     tech_info = {}
     try:
-        response = session.get(url, timeout=10, verify=False)
+        response = session.get(url, timeout=8, verify=False)  # <<-- timeout dikurangi ke 8
         headers = response.headers
 
         if 'Server' in headers:
@@ -56,7 +57,7 @@ def find_tech_info(url, session):
 def check_robots_txt(url, session):
     robots_url = url.rstrip('/') + "/robots.txt"
     try:
-        response = session.get(robots_url, timeout=10, verify=False)
+        response = session.get(robots_url, timeout=8, verify=False)  # <<-- timeout dikurangi ke 8
         if response.status_code == 200:
             paths = [line for line in response.text.splitlines() if line.strip().lower().startswith(('disallow:', 'allow:'))]
             return {'ditemukan': True, 'paths': paths}
@@ -69,7 +70,7 @@ def check_robots_txt(url, session):
 def check_exposed_git(url, session):
     git_url = url.rstrip('/') + "/.git/HEAD"
     try:
-        response = session.get(git_url, timeout=10, verify=False)
+        response = session.get(git_url, timeout=8, verify=False)  # <<-- timeout dikurangi ke 8
         if response.status_code in (200, 403):
             return {'ditemukan': True, 'status_code': response.status_code, 'level_risiko': 'Kritis'}
         else:
@@ -81,7 +82,7 @@ def check_exposed_git(url, session):
 def check_mixed_content(url, session):
     mixed_content_list = []
     try:
-        response = session.get(url, timeout=10, verify=False)
+        response = session.get(url, timeout=8, verify=False)  # <<-- timeout dikurangi ke 8
         if not url.startswith('https://'):
             return {'ditemukan': False, 'status': 'Bukan situs HTTPS'}
 
@@ -141,7 +142,7 @@ def calculate_security_score(results):
             'recommendation': "Sembunyikan header 'X-Powered-By'."
         })
 
-    # Pengecekan Mixed Content (pastikan block ini sebelum return)
+    # Pengecekan Mixed Content
     if results.get('mixed_content_info', {}).get('ditemukan'):
         score -= 10
         findings_with_recs.append({
@@ -176,22 +177,29 @@ def run_full_scan(target_url):
     session = requests.Session()
     session.headers.update({'User-Agent': 'MySecurityScanner/1.0'})
 
-    scan_results = {
-        'target': target_url,
-        'security_headers': check_security_headers(target_url, session),
-        'technology_info': find_tech_info(target_url, session),
-        'robots_txt_info': check_robots_txt(target_url, session),
-        'exposed_git_info': check_exposed_git(target_url, session),
-        'mixed_content_info': check_mixed_content(target_url, session)
+    # <<-- PERUBAHAN UTAMA: Jalankan semua modul secara PARALEL
+    scan_results = {'target': target_url}
+
+    tasks = {
+        'security_headers':  lambda: check_security_headers(target_url, session),
+        'technology_info':   lambda: find_tech_info(target_url, session),
+        'robots_txt_info':   lambda: check_robots_txt(target_url, session),
+        'exposed_git_info':  lambda: check_exposed_git(target_url, session),
+        'mixed_content_info': lambda: check_mixed_content(target_url, session),
     }
 
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        futures = {executor.submit(fn): key for key, fn in tasks.items()}
+        for future in as_completed(futures):
+            key = futures[future]
+            try:
+                scan_results[key] = future.result()
+            except Exception as e:
+                scan_results[key] = {'error': str(e)}
+    # <<-- AKHIR PERUBAHAN
+
     score_data = calculate_security_score(scan_results)
-    
-    # PERBAIKAN: Masukkan hasil skor ke dalam kunci 'score_info'
-    scan_results["score_info"] = score_data 
-    
-    # CATATAN: Hapus kunci 'score', 'grade', dan 'findings' yang di-update di root jika Anda tidak memerlukannya.
-    # Karena app.py mengharapkan 'score_info', kita hanya menambahkan itu.
+    scan_results["score_info"] = score_data
 
     pprint.pprint(scan_results)
     return scan_results
@@ -201,6 +209,3 @@ if __name__ == "__main__":
     target_website = "darmajaya.ac.id"
     results = run_full_scan(target_website)
     pprint.pprint(results)
-
-
-
