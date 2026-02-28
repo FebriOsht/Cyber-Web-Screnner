@@ -1,4 +1,4 @@
-from flask import Flask, render_template, request, make_response, redirect, url_for # <<-- PERBAIKAN 1: Menambahkan make_response
+from flask import Flask, render_template, request, make_response, redirect, url_for
 import os
 from datetime import datetime
 import math
@@ -6,16 +6,16 @@ from database import init_db, add_scan_result, get_all_scans
 
 PER_PAGE = 20
 # Tentukan jalur absolut ke folder 'templates'
-# os.path.dirname(os.path.abspath(__file__)) mendapatkan path direktori 'src'
 template_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'templates')
 app = Flask(__name__, template_folder=template_dir) 
 
-# Endpoint khusus untuk UptimeRobot agar aplikasi tetap bangun (awake)
+# =======================
+# ENDPOINT UNTUK UPTIMEROBOT
+# =======================
 @app.route('/ping')
 def ping():
+    """Gunakan URL ini di UptimeRobot: https://cyberwebscanner.onrender.com/ping"""
     return "OK", 200
-
-print("TEMPLATE_FOLDER (Explicitly Set):", app.template_folder)
 
 # =======================
 # HALAMAN UTAMA
@@ -25,47 +25,62 @@ def index():
     return render_template('index.html')
 
 # =======================
-# JALANKAN PEMINDAIAN (langsung tanpa Celery)
+# JALANKAN PEMINDAIAN
 # =======================
-@app.route("/scan", methods=["POST"])
+@app.route("/scan", methods=["GET", "POST"])
 def scan():
-    try:
-        url = request.form["url"]
+    # JIKA DIAKSES VIA GET (Misal: UptimeRobot atau User mengetik manual URL /scan)
+    # Kita alihkan ke halaman utama agar tidak muncul Internal Server Error (500)
+    if request.method == "GET":
+        return redirect(url_for('index'))
 
+    # JIKA DIAKSES VIA POST (User menekan tombol Scan)
+    try:
+        url = request.form.get("url")
+
+        # Jika input URL kosong
+        if not url:
+            return redirect(url_for('index'))
+
+        # Tambahkan protokol otomatis jika user lupa
         if not url.startswith("http://") and not url.startswith("https://"):
             url = "https://" + url
 
+        # Jalankan mesin scanner
         from scanner import run_full_scan
         result = run_full_scan(url)
 
         # Simpan hasil ke database
-        try: # <<< Indentasi diperbaiki
-            # PERBAIKAN LOGIKA: Ambil score dan grade dari 'score_info' (konsisten dengan scanner.py)
+        try:
             score = result.get("score_info", {}).get("score", 0)
             grade = result.get("score_info", {}).get("grade", "N/A")
-            
             add_scan_result(url, score, grade, result)
-        except Exception as e: # <<< Indentasi diperbaiki
-            print(f"[DB ERROR] {e}") # <<< Indentasi diperbaiki
+        except Exception as e:
+            print(f"[DB ERROR] {e}")
 
-        # Tampilkan hasil di halaman
-        # Menggunakan nama template baru yang sudah disepakati
+        # Tampilkan hasil akhir
         return render_template("scan_result.html", results=result)
 
     except Exception as e:
         error_type = type(e).__name__
         error_detail = str(e)
         
-        # Menggunakan HTML murni untuk menghindari error Jinja2
+        # Tampilan Error 500 yang lebih informatif jika terjadi crash pada scanner
         html_content = f"""
         <!DOCTYPE html>
         <html>
         <head><title>Kesalahan Server</title></head>
-        <body>
-            <h1>❌ TERJADI KESALAHAN INTERNAL SERVER (500)</h1>
-            <p><strong>TIPE ASLI:</strong> {error_type}</p>
-            <p><strong>DETAIL ASLI:</strong> {error_detail}</p>
-            <a href="/">Kembali ke Halaman Utama</a>
+        <body style="font-family:sans-serif; text-align:center; padding-top:50px; background:#f4f4f4;">
+            <div style="display:inline-block; background:white; padding:30px; border-radius:10px; box-shadow:0 2px 10px rgba(0,0,0,0.1);">
+                <h1 style="color:#e74c3c;">❌ TERJADI KESALAHAN INTERNAL (500)</h1>
+                <p>Gagal memproses pemindaian untuk URL tersebut.</p>
+                <div style="text-align:left; background:#eee; padding:10px; font-family:monospace; font-size:12px;">
+                    <strong>Tipe:</strong> {error_type}<br>
+                    <strong>Detail:</strong> {error_detail}
+                </div>
+                <br>
+                <a href="/" style="text-decoration:none; color:#3498db; font-weight:bold;">← Kembali ke Beranda</a>
+            </div>
         </body>
         </html>
         """
@@ -74,36 +89,28 @@ def scan():
 # =======================
 # HALAMAN RIWAYAT PEMINDAIAN
 # =======================
-# Definisikan batas data per halaman
-# app.py
-
-# ...
 @app.route('/history')
 def history():
-    # 1. Ambil nomor halaman dari URL, default ke 1
+    # Ambil nomor halaman dari parameter URL (?page=1)
     page = request.args.get('page', 1, type=int) 
     
-    # 2. Ambil data
+    # Ambil semua data dari database
     all_scans = get_all_scans() 
     
-    # KOREKSI: Pastikan all_scans adalah list, jika None, jadikan list kosong.
     if all_scans is None:
         all_scans = []
         
     total_scans = len(all_scans)
     offset = (page - 1) * PER_PAGE
     
-    # Lakukan slicing data untuk halaman saat ini
+    # Potong data sesuai halaman (Pagination)
     scans_for_page = all_scans[offset:offset + PER_PAGE]
 
-    # Hitung total halaman
-    if total_scans == 0:
-        total_pages = 0
-    else:
-        total_pages = math.ceil(total_scans / PER_PAGE)
+    # Hitung total halaman yang dibutuhkan
+    total_pages = math.ceil(total_scans / PER_PAGE) if total_scans > 0 else 0
     
+    # Konversi data ke format list dictionary untuk template
     scans_list = [
-        # ... (list comprehension yang sama)
         {
             "id": row["id"],
             "url": row["url"],
@@ -111,10 +118,9 @@ def history():
             "score": row["score"],
             "grade": row["grade"]
         }
-        for row in scans_for_page # Gunakan scans_for_page
+        for row in scans_for_page
     ]
     
-    # Teruskan data pagination ke template
     return render_template("history.html", 
                            scans=scans_list,
                            page=page,
@@ -128,16 +134,11 @@ def docs():
     return render_template('docs.html', datetime=datetime)
 
 # =======================
-# JALANKAN APP
+# KONFIGURASI JALANKAN APLIKASI
 # =======================
 if __name__ == "__main__":
     init_db()
-    debug_mode = os.environ.get("FLASK_DEBUG", "1") == "1"
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)), debug=debug_mode)
-
-
-
-
-
-
-
+    # Port dinamis untuk Render (default 5000 jika lokal)
+    port = int(os.environ.get("PORT", 5000))
+    # Matikan debug=True jika sudah stabil untuk menghemat resource
+    app.run(host="0.0.0.0", port=port, debug=False)
